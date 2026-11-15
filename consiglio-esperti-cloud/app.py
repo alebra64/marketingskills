@@ -244,7 +244,7 @@ def read_normattiva_article(ref):
                 if not wanted.fullmatch(v):continue
                 end=next((j for j in range(i+1,len(lines)) if re.fullmatch(r'Art\.\s*\d{1,4}(?:[-\s]*(?:bis|ter))?\.?',lines[j],re.I)),len(lines))
                 section='\n'.join(lines[i:end]).strip()
-                if 160<=len(section)<=45000 and re.search(r'\b1\s*\.',section):
+                if 240<=len(section)<=45000 and (re.search(r'\b1\s*\.',section) or n in (26,615,617)):
                     found=section
             if not found:raise ValueError('Pagina aperta ma articolo non isolato')
             expected={
