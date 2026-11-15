@@ -136,12 +136,75 @@ BASE='''Sei un modello AI in un collegio interdisciplinare di analisi giuridica 
 
 def strip_html(s):return BeautifulSoup(s,'html.parser').get_text(' ',strip=True)
 
-def check_reference(ref):
-    """Strict source reading. A site response alone is NEVER proof of an article."""
-    x={'riferimento':ref,'stato':'NON VERIFICATA','motivo':'Nessun testo normativo controllabile recuperato'}
-    m=re.fullmatch(r'art(?:icolo|\.)?\s*(\d{1,3})\s*(?:GDPR|Regolamento UE 2016/679)',ref.strip(),re.I)
+def canonical_ref(ref):
+    """Uniforma citazioni equivalenti, senza confondere provvedimenti diversi."""
+    value=re.sub(r'\s+',' ',ref.strip())
+    m=re.fullmatch(r'art\.?\s*(\d{1,3})(?:\s*[-–]\s*(bis|ter))?\s*(GDPR|Regolamento UE 2016/679|DPR\s*602/1973|c\.p\.c\.)',value,re.I)
+    if not m:return value
+    number=str(int(m.group(1)))+('-'+m.group(2).lower() if m.group(2) else '')
+    src=m.group(3).lower()
+    if 'gdpr' in src or '2016/679' in src:return 'art. '+number+' GDPR'
+    return 'art. '+number+(' DPR 602/1973' if '602' in src else ' c.p.c.')
+
+
+def verify_italian_article(ref):
+    """Legge il testo di un articolo da un portale istituzionale MEF.
+    Non equipara un link valido al recupero del testo dell'articolo.
+    """
+    from urllib.parse import urlencode, urlsplit
+    normalized=canonical_ref(ref)
+    m=re.fullmatch(r'art\.\s*(\d{1,3})(-bis|-ter)?\s*(DPR 602/1973|c\.p\.c\.)',normalized,re.I)
+    result={'riferimento':normalized,'stato':'NON VERIFICATA','motivo':'Non è stato recuperato un testo ufficiale identificabile'}
     if not m:
-        x['motivo']='Connettore diretto attualmente disponibile solo per articoli GDPR';return x
+        result['motivo']='Formato del riferimento non supportato';return result
+    n=int(m.group(1));ext=(m.group(2) or '').lower()
+    dpr='602' in m.group(3)
+    actid='{65884F57-134B-46C9-B400-BE69B20AF6E8}' if dpr else '{57BBB567-1573-4FC0-BD87-BE4D68CB1B5F}'
+    label='Articolo '+str(n)+((' '+ext[1:]) if ext else '')
+    code=(f'{n:015d}'+('999990000200' if ext=='-bis' else '999990000300' if ext=='-ter' else '')).ljust(132,'0') if ext else f'{n:015d}'.ljust(132,'0')
+    # Codice ordinamento ufficiale: il prefisso per bis/ter deve riprodurre l'ordinamento del DEF.
+    if ext=='-bis':code=(f'{n:015d}'+'999990000200').ljust(132,'0')
+    if ext=='-ter':code=(f'{n:015d}'+'999990000300').ljust(132,'0')
+    url='https://def.finanze.it/DocTribFrontend/getAttoNormativoDetail.do?'+urlencode({'ACTION':'getArticolo','codiceOrdinamento':code,'id':actid})
+    result['url']=url
+    try:
+        req=Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html'})
+        with build_opener().open(req,timeout=22) as resp:
+            dest=resp.geturl()
+            if urlsplit(dest).hostname not in ('def.finanze.it','def.giustiziatributaria.gov.it'):
+                raise ValueError('Redirect verso dominio non istituzionale')
+            raw=resp.read(2_000_000)
+        soup=BeautifulSoup(raw,'html.parser')
+        for tag in soup(['script','style','nav','footer']):tag.decompose()
+        lines=[re.sub(r'\s+',' ',x).strip() for x in soup.get_text('\n',strip=True).splitlines()]
+        lines=[x for x in lines if x]
+        header=' '.join(lines[:150]).lower()
+        if dpr:
+            if not re.search(r'decreto del presidente della repubblica del 29/09/1973 n\.\s*602',header):
+                raise ValueError('Intestazione del DPR 602/1973 non identificata')
+        elif 'codice procedura civile' not in header and 'codice di procedura civile' not in header:
+            raise ValueError('Intestazione del codice di procedura civile non identificata')
+        begins=[i for i,x in enumerate(lines) if x.lower()=='testo']
+        if not begins:raise ValueError('Sezione Testo assente')
+        target=re.compile(r'articolo\s*'+str(n)+r'\s*'+(ext[1:] if ext else '')+r'$',re.I)
+        where=next((i for i in range(begins[0]+1,len(lines)) if target.fullmatch(lines[i])),None)
+        if where is None:raise ValueError('Intestazione dell’articolo esatto assente')
+        ending=next((i for i in range(where+1,len(lines)) if lines[i].lower() in ('documenti citati','torna al sommario','torna al dettaglio atto','testi previgenti')),len(lines))
+        article='\n'.join(lines[where:ending]).strip()
+        if len(article)<180 or len(article)>45000 or not re.search(r'(in vigore dal|1\.|1\s*[-–])',article,re.I):
+            raise ValueError('Testo articolo assente, ambiguo o di lunghezza inattesa')
+        return {'riferimento':normalized,'stato':'TESTO CONSULTATO','fonte':'def.finanze.it (Ministero economia e finanze)','url':dest,'testo':article,'data_consultazione':datetime.datetime.now(datetime.timezone.utc).isoformat(),'avviso':'Consultazione del testo ufficiale; vigenza storica rispetto ai fatti della pratica da controllare separatamente'}
+    except Exception as e:
+        result['motivo']='Verifica MEF non riuscita ('+type(e).__name__+': '+str(e)[:115]+')'
+        return result
+
+
+def check_reference(ref):
+    """Segna TESTO CONSULTATO solo se l'articolo esatto è stato letto dal sito ufficiale."""
+    ref=canonical_ref(ref)
+    x={'riferimento':ref,'stato':'NON VERIFICATA','motivo':'Nessun testo normativo controllabile recuperato'}
+    m=re.fullmatch(r'art\.\s*(\d{1,3})\s*GDPR',ref.strip(),re.I)
+    if not m:return verify_italian_article(ref)
     n=int(m.group(1))
     urls=['https://eur-lex.europa.eu/legal-content/IT/TXT/HTML/?uri=CELEX%3A32016R0679',
           'https://www.garanteprivacy.it/regolamentoue']
@@ -168,7 +231,6 @@ def check_reference(ref):
         except Exception as e:x['motivo']=f'Recupero fonte non riuscito ({type(e).__name__})'
     return x
 
-
 def references(question,analyses):
     joined='\n'.join([question]+[str(v) for v in analyses.values()])
     out=[]
@@ -179,7 +241,7 @@ def references(question,analyses):
         if essential not in out and ('GDPR' in joined or 'privacy' in joined.lower()):out.append(essential)
     for r in re.findall(r'art\.\s*\d+(?:-bis)?\s*(?:DPR\s*602/1973|c\.p\.c\.)',joined,re.I):
         if r not in out:out.append(r)
-    return out[:22]
+    return list(dict.fromkeys(canonical_ref(r) for r in out))[:22]
 
 
 def run_practice(pid):
@@ -366,6 +428,48 @@ def view_case(pid):
     p['created_at']=p['created_at'].isoformat()
     return jsonify(p)
 
+def recheck_sources(pid):
+    """Rivalida solo le citazioni; non invia dati della pratica a LLM, non cambia i pareri."""
+    with LOCK:RUNNING.add(pid)
+    try:
+        p=fetch_practice(pid)
+        if not p:raise RuntimeError('Fascicolo inesistente')
+        old=p['sources'] or []
+        unique={}
+        for src in old:
+            ref=canonical_ref(src.get('riferimento',''))
+            if not ref:continue
+            if ref not in unique or src.get('stato')=='TESTO CONSULTATO':
+                unique[ref]={**src,'riferimento':ref}
+        out=[]
+        for ref,src in unique.items():
+            item=src if src.get('stato')=='TESTO CONSULTATO' and src.get('testo') else check_reference(ref)
+            out.append(item)
+            update_practice(pid,sources=out)
+            print('CONSIGLIO_SOURCE_RECHECK ref='+ref+' state='+item.get('stato','')+' reason='+item.get('motivo','')[:90],flush=True)
+        # La revisione AI precedente NON è rivalidata automaticamente.
+        count=sum(v.get('stato')=='TESTO CONSULTATO' for v in out)
+        update_practice(pid,sources=out,status='PARZIALE',error='Analisi dei nove agenti completata. Fonti consultate: '+str(count)+'/'+str(len(out))+'. Revisione finale da aggiornare rispetto al nuovo registro delle fonti.')
+        print('CONSIGLIO_SOURCE_RECHECK finished consulted='+str(count)+'/'+str(len(out)),flush=True)
+    except Exception as e:
+        print('CONSIGLIO_SOURCE_RECHECK failure='+type(e).__name__,flush=True)
+    finally:
+        with LOCK:RUNNING.discard(pid)
+
+
+@APP.post('/api/cases/<pid>/recheck-sources')
+@require_auth
+@safe_post
+def recheck_sources_route(pid):
+    p=fetch_practice(pid)
+    if not p:return jsonify(error='Fascicolo non trovato'),404
+    with LOCK:
+        if pid in RUNNING or p['status']=='IN_CORSO':return jsonify(error='Istruttoria già in corso'),409
+        update_practice(pid,status='IN_CORSO',error='Verifica autonoma delle fonti in corso. Nessun modello AI chiamato.')
+        EXEC.submit(recheck_sources,pid)
+    return jsonify(ok=True,status='IN_CORSO',mode='SOLO_FONTI'),202
+
+
 @APP.post('/api/cases/<pid>/run')
 @require_auth
 @safe_post
@@ -419,7 +523,7 @@ INDEX='''<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="
 <section id="workspace" class="hide"><div class="action"><button class="btn secondary" onclick="showDashboard()">Archivio</button><button class="btn secondary" onclick="showNew()">Nuova istruttoria</button><button class="btn secondary" onclick="logout()">Esci</button></div><p id="status" class="muted"></p>
 <div id="dashboard"><h2>Fascicoli e stato del collegio</h2><div class="panel"><h3>Provider AI</h3><div class="grid" id="providers"></div><p class="muted">Chiave presente non significa API verificata: l'effettivo collegamento viene testato durante un'istruttoria.</p></div><div class="panel"><h3>Pratica già predisposta</h3><p>AdER: pignoramento stipendiale, rateizzazione, dati comunicati al datore e minimizzazione GDPR. Fatti riferiti, non atti originali.</p><button class="btn" onclick="seedAder()">Apri fascicolo AdER già compilato</button></div><div class="panel"><h3>Archivio istruttorie</h3><div id="cases">Nessuna pratica</div></div></div>
 <div id="new" class="panel hide"><h2>Nuova istruttoria</h2><label>Titolo</label><input id="title"><label>Quesito</label><textarea id="quesito"></textarea><div class="action"><button class="btn" onclick="createCase()">Salva fascicolo</button></div></div>
-<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><button class="btn secondary hide" id="resumebtn" onclick="resumeCase()">Recupera i soli agenti falliti</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
+<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><button class="btn secondary hide" id="resumebtn" onclick="resumeCase()">Recupera i soli agenti falliti</button><button class="btn secondary" id="sourcesbtn" onclick="recheckSources()">Verifica solo le fonti (senza API AI)</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
 </section><p class="footer">Analisi automatizzata. Le risposte non sostituiscono una consulenza professionale. La parola “verificata” è riservata a testi realmente recuperati e identificati.</p></main><script>
 let csrf='',active=null,timer=null;async function api(path,opts={}){opts.credentials='same-origin';opts.headers={...(opts.headers||{}),'Content-Type':'application/json'};if(opts.method&&opts.method!='GET')opts.headers['X-CSRF']=csrf;let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw Error(d.error||'Errore servizio');return d}
 function el(id){return document.getElementById(id)}function view(id){for(let x of ['dashboard','new','detail'])el(x).classList.toggle('hide',x!=id)}function msg(t,bad=false){el('status').textContent=t;el('status').className=bad?'error':'muted'}function err(t){el('caseerror').textContent=t}
@@ -430,7 +534,8 @@ async function showDashboard(){clearInterval(timer);view('dashboard');try{let s=
 function showNew(){clearInterval(timer);view('new')}async function seedAder(){try{let d=await api('/api/cases/ader',{method:'POST',body:'{}'});openCase(d.id)}catch(e){msg(e.message,true)}}async function createCase(){try{let d=await api('/api/cases',{method:'POST',body:JSON.stringify({title:el('title').value,quesito:el('quesito').value})});openCase(d.id)}catch(e){msg(e.message,true)}}
 function esc(s){return String(s||'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))}
 async function openCase(id){clearInterval(timer);active=id;view('detail');el('casetitle').textContent='Fascicolo';await refresh();timer=setInterval(refresh,7000)}
-async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';let stages=d.stages||{};el('runbtn').disabled=d.status=='IN_CORSO'||Object.keys(stages).length>0;el('resumebtn').classList.toggle('hide',d.status=='IN_CORSO'||!Object.values(stages).some(v=>v.stato=='ERRORE'));el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';let stages=d.stages||{};el('runbtn').disabled=d.status=='IN_CORSO'||Object.keys(stages).length>0;el('resumebtn').classList.toggle('hide',d.status=='IN_CORSO'||!Object.values(stages).some(v=>v.stato=='ERRORE'));el('sourcesbtn').disabled=d.status=='IN_CORSO';el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function recheckSources(){try{await api('/api/cases/'+active+'/recheck-sources',{method:'POST',body:'{}'});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function resumeCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/resume',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function runCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/run',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh()}catch(e){err(e.message)}}
 init();el('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
@@ -444,6 +549,9 @@ if DB:
     init_db()
     with dbconn() as _cn:
         _cn.execute("UPDATE practices SET status='PARZIALE', error='Esecuzione interrotta dal riavvio del server' WHERE status='IN_CORSO'")
+    if os.getenv('SOURCE_RECHECK_AT_BOOT','0')=='1':
+        threading.Thread(target=recheck_sources,args=('ader-pratica-principale',),daemon=True).start()
+
     if os.getenv('AUDIT_SOURCE_REFS','0') == '1':
         try:
             with dbconn() as _cn:
