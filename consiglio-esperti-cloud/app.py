@@ -148,9 +148,7 @@ def canonical_ref(ref):
 
 
 def verify_italian_article(ref):
-    """Legge il testo di un articolo da un portale istituzionale MEF.
-    Non equipara un link valido al recupero del testo dell'articolo.
-    """
+    """Legge articolo esatto da fonti istituzionali, senza eludere HTTPS."""
     from urllib.parse import urlencode, urlsplit
     normalized=canonical_ref(ref)
     m=re.fullmatch(r'art\.\s*(\d{1,3})(-bis|-ter)?\s*(DPR 602/1973|c\.p\.c\.)',normalized,re.I)
@@ -161,43 +159,49 @@ def verify_italian_article(ref):
     dpr='602' in m.group(3)
     actid='{65884F57-134B-46C9-B400-BE69B20AF6E8}' if dpr else '{57BBB567-1573-4FC0-BD87-BE4D68CB1B5F}'
     label='Articolo '+str(n)+((' '+ext[1:]) if ext else '')
-    code=(f'{n:015d}'+('999990000200' if ext=='-bis' else '999990000300' if ext=='-ter' else '')).ljust(132,'0') if ext else f'{n:015d}'.ljust(132,'0')
-    # Codice ordinamento ufficiale: il prefisso per bis/ter deve riprodurre l'ordinamento del DEF.
-    if ext=='-bis':code=(f'{n:015d}'+'999990000200').ljust(132,'0')
-    if ext=='-ter':code=(f'{n:015d}'+'999990000300').ljust(132,'0')
-    url='https://def.finanze.it/DocTribFrontend/getAttoNormativoDetail.do?'+urlencode({'ACTION':'getArticolo','codiceOrdinamento':code,'id':actid})
-    result['url']=url
-    try:
-        req=Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html'})
-        with build_opener().open(req,timeout=22) as resp:
-            dest=resp.geturl()
-            if urlsplit(dest).hostname not in ('def.finanze.it','def.giustiziatributaria.gov.it'):
-                raise ValueError('Redirect verso dominio non istituzionale')
-            raw=resp.read(2_000_000)
-        soup=BeautifulSoup(raw,'html.parser')
-        for tag in soup(['script','style','nav','footer']):tag.decompose()
-        lines=[re.sub(r'\s+',' ',x).strip() for x in soup.get_text('\n',strip=True).splitlines()]
-        lines=[x for x in lines if x]
-        header=' '.join(lines[:150]).lower()
-        if dpr:
-            if not re.search(r'decreto del presidente della repubblica del 29/09/1973 n\.\s*602',header):
-                raise ValueError('Intestazione del DPR 602/1973 non identificata')
-        elif 'codice procedura civile' not in header and 'codice di procedura civile' not in header:
-            raise ValueError('Intestazione del codice di procedura civile non identificata')
-        begins=[i for i,x in enumerate(lines) if x.lower()=='testo']
-        if not begins:raise ValueError('Sezione Testo assente')
-        target=re.compile(r'articolo\s*'+str(n)+r'\s*'+(ext[1:] if ext else '')+r'$',re.I)
-        where=next((i for i in range(begins[0]+1,len(lines)) if target.fullmatch(lines[i])),None)
-        if where is None:raise ValueError('Intestazione dell’articolo esatto assente')
-        ending=next((i for i in range(where+1,len(lines)) if lines[i].lower() in ('documenti citati','torna al sommario','torna al dettaglio atto','testi previgenti')),len(lines))
-        article='\n'.join(lines[where:ending]).strip()
-        if len(article)<180 or len(article)>45000 or not re.search(r'(in vigore dal|1\.|1\s*[-–])',article,re.I):
-            raise ValueError('Testo articolo assente, ambiguo o di lunghezza inattesa')
-        return {'riferimento':normalized,'stato':'TESTO CONSULTATO','fonte':'def.finanze.it (Ministero economia e finanze)','url':dest,'testo':article,'data_consultazione':datetime.datetime.now(datetime.timezone.utc).isoformat(),'avviso':'Consultazione del testo ufficiale; vigenza storica rispetto ai fatti della pratica da controllare separatamente'}
-    except Exception as e:
-        result['motivo']='Verifica MEF non riuscita ('+type(e).__name__+': '+str(e)[:115]+')'
-        return result
-
+    code=(f'{n:015d}'+('999990000200' if ext=='-bis' else '999990000300' if ext=='-ter' else '')).ljust(132,'0')
+    qs=urlencode({'ACTION':'getArticolo','codiceOrdinamento':code,'id':actid})
+    qs_print=urlencode({'articolo':label,'codiceOrdinamento':code,'id':actid})
+    urls=[
+        'https://def.finanze.it/DocTribFrontend/getAttoNormativoDetail.do?'+qs,
+        'https://def.giustiziatributaria.gov.it/DocTribFrontend/executePrintArticolo.do?'+qs_print
+    ]
+    result['url']=urls[0]
+    errors=[]
+    for url in urls:
+        try:
+            req=Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html'})
+            with build_opener().open(req,timeout=18) as resp:
+                dest=resp.geturl()
+                if urlsplit(dest).hostname not in ('def.finanze.it','def.giustiziatributaria.gov.it'):
+                    raise ValueError('Redirect verso dominio non istituzionale')
+                raw=resp.read(2_000_000)
+            soup=BeautifulSoup(raw,'html.parser')
+            for tag in soup(['script','style','nav','footer']):tag.decompose()
+            lines=[re.sub(r'\s+',' ',x).strip() for x in soup.get_text('\n',strip=True).splitlines()]
+            lines=[x for x in lines if x]
+            header=' '.join(lines[:180]).lower()
+            if dpr:
+                if not re.search(r'decreto del presidente della repubblica del 29/09/1973 n\.\s*602',header):
+                    raise ValueError('Intestazione DPR 602/1973 non identificata')
+            elif 'codice procedura civile' not in header and 'codice di procedura civile' not in header:
+                raise ValueError('Intestazione del codice di procedura civile non identificata')
+            # L'indice di navigazione non vale come articolo effettivamente letto.
+            begins=[i for i,v in enumerate(lines) if v.lower()=='testo']
+            pos=begins[0]+1 if begins else 0
+            target=re.compile(r'articolo\s*'+str(n)+r'\s*'+(ext[1:] if ext else '')+r'$',re.I)
+            where=next((i for i in range(pos,len(lines)) if target.fullmatch(lines[i])),None)
+            if where is None:raise ValueError('Intestazione dell’articolo esatto assente')
+            stop=('documenti citati','torna al sommario','torna al dettaglio atto','testi previgenti','pagina 1')
+            ending=next((i for i in range(where+1,len(lines)) if lines[i].lower() in stop),len(lines))
+            article='\n'.join(lines[where:ending]).strip()
+            if len(article)<180 or len(article)>45000 or not re.search(r'(in vigore dal|1\.|1\s*[-–])',article,re.I):
+                raise ValueError('Testo articolo assente o non identificabile')
+            return {'riferimento':normalized,'stato':'TESTO CONSULTATO','fonte':urlsplit(dest).hostname,'url':dest,'testo':article,'data_consultazione':datetime.datetime.now(datetime.timezone.utc).isoformat(),'avviso':'Consultazione di testo istituzionale; la vigenza alla data dei fatti deve essere controllata separatamente'}
+        except Exception as e:
+            errors.append(urlsplit(url).hostname+': '+type(e).__name__+': '+str(e)[:70])
+    result['motivo']=' ; '.join(errors)[:310]
+    return result
 
 def check_reference(ref):
     """Segna TESTO CONSULTATO solo se l'articolo esatto è stato letto dal sito ufficiale."""
