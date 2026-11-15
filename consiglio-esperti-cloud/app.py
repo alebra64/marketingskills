@@ -46,6 +46,11 @@ def init_db():
           stages JSONB NOT NULL DEFAULT '{}'::jsonb, sources JSONB NOT NULL DEFAULT '[]'::jsonb,
           final TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', consent BOOLEAN NOT NULL DEFAULT false
         )''')
+        if CASE_ADER:
+            cn.execute(
+                'INSERT INTO practices(id,title,quesito) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING',
+                ('ader-pratica-principale', 'AdER: pignoramento e minimizzazione GDPR', CASE_ADER)
+            )
 
 
 def j(data):return json.dumps(data,ensure_ascii=False)
@@ -217,7 +222,7 @@ def run_practice(pid):
         except Exception as e:fail('revisore',e)
         ok=sum(1 for v in stages.values() if v['stato']=='COMPLETATO')
         verified_count=sum(1 for x in verified if x['stato']=='TESTO CONSULTATO')
-        status='COMPLETATO' if ok==9 else ('PARZIALE' if ok>0 else 'ERRORE')
+        status='COMPLETATO' if ok==9 and verified_count>0 and all(x['stato']=='TESTO CONSULTATO' for x in verified) else ('PARZIALE' if ok>0 else 'ERRORE')
         conclusion=stages.get('revisore',{}).get('output','')
         if verified_count==0:
             conclusion='**FONTI NON DOCUMENTATE: nessun testo normativo ufficiale recuperato. Non utilizzare come parere verificato.**\n\n'+conclusion
@@ -267,9 +272,10 @@ def state():
 @safe_post
 def ader():
     if not CASE_ADER: return jsonify(error='Fascicolo privato non ancora configurato sul server'),409
-    pid=str(uuid.uuid4())
-    with dbconn() as cn:cn.execute('INSERT INTO practices(id,title,quesito) VALUES (%s,%s,%s)',(pid,'AdER: pignoramento e minimizzazione GDPR',CASE_ADER))
-    return jsonify(id=pid),201
+    pid='ader-pratica-principale'
+    with dbconn() as cn:
+        cn.execute('INSERT INTO practices(id,title,quesito) VALUES (%s,%s,%s) ON CONFLICT (id) DO NOTHING',(pid,'AdER: pignoramento e minimizzazione GDPR',CASE_ADER))
+    return jsonify(id=pid),200
 
 @APP.post('/api/cases')
 @require_auth
