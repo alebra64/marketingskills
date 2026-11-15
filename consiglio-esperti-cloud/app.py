@@ -598,7 +598,7 @@ def normattiva_probe():
                 print('CONSIGLIO_NORM_PROBE ok host='+str(rr.geturl().split('/')[2])+' status='+str(rr.status)+' bytes='+str(len(raw))+' article_words='+str(raw.lower().count(b'pignoramento'))+' code_72='+str(raw.lower().count(b'72-bis')),flush=True)
                 _sp=BeautifulSoup(raw,'html.parser')
                 for _x in _sp(['script','style','nav','footer']):_x.decompose()
-                _lines=[_v.strip() for _v in _sp.get_text('\\n',strip=True).splitlines() if _v.strip()]
+                _lines=[_v.strip() for _v in _sp.get_text('\n',strip=True).splitlines() if _v.strip()]
                 _targets=[(_i,_v[:75]) for _i,_v in enumerate(_lines) if ('72-bis' in _v.lower() or 'pignoramento dei crediti verso terzi' in _v.lower())]
                 for _i,_v in _targets[-6:]:
                     print('CONSIGLIO_NORM_TEXT index='+str(_i)+' line='+repr(_v)[:100]+' next='+repr(' || '.join(_lines[_i+1:_i+6]))[:360],flush=True)
