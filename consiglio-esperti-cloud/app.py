@@ -501,11 +501,16 @@ def recheck_sources(pid):
             if not ref:continue
             if ref not in unique or src.get('stato')=='TESTO CONSULTATO':
                 unique[ref]={**src,'riferimento':ref}
+        # Ricostruisce tutti i riferimenti dai nove pareri in caso di riavvio
+        # e non sovrascrive il registro sul database prima della fine della verifica.
+        inferred=references(p['quesito'],{k:v.get('output','') for k,v in (p['stages'] or {}).items() if v.get('stato')=='COMPLETATO'})
+        for ref in inferred:
+            unique.setdefault(canonical_ref(ref),{'riferimento':canonical_ref(ref),'stato':'NON VERIFICATA'})
+        print('CONSIGLIO_SOURCE_RECHECK input_refs='+str(len(unique)),flush=True)
         out=[]
         for ref,src in unique.items():
             item=src if src.get('stato')=='TESTO CONSULTATO' and src.get('testo') else check_reference(ref)
             out.append(item)
-            update_practice(pid,sources=out)
             print('CONSIGLIO_SOURCE_RECHECK ref='+ref+' state='+item.get('stato','')+' reason='+item.get('motivo','')[:90],flush=True)
         # La revisione AI precedente NON è rivalidata automaticamente.
         count=sum(v.get('stato')=='TESTO CONSULTATO' for v in out)
