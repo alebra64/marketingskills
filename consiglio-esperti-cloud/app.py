@@ -357,4 +357,23 @@ if DB:
     init_db()
     with dbconn() as _cn:
         _cn.execute("UPDATE practices SET status='PARZIALE', error='Esecuzione interrotta dal riavvio del server' WHERE status='IN_CORSO'")
+# Verifica neutra dei provider, solo se attivata temporaneamente dal gestore
+# Non invia pratiche, documenti o informazioni personali.
+def probe_providers():
+    for role in ('coordinatore','privacy','tributario'):
+        provider,model=MODELS[role]
+        try:
+            kname={'openai':'OPENAI_API_KEY','anthropic':'ANTHROPIC_API_KEY','gemini':'GEMINI_API_KEY'}[provider]
+            if not os.getenv(kname):
+                print(f'CONSIGLIO_PROBE provider={provider} result=MISSING_KEY',flush=True)
+                continue
+            result=ask(role,'Questo è un test puramente tecnico. Rispondi con la sola parola OK.','Scrivi OK.')
+            print(f'CONSIGLIO_PROBE provider={provider} result=SUCCESS nonempty={bool(result.strip())} model={model}',flush=True)
+        except Exception as exc:
+            status=re.search(r'HTTP\\s+\\d{3}',str(exc))
+            code=status.group(0) if status else type(exc).__name__
+            print(f'CONSIGLIO_PROBE provider={provider} result=FAILED error_type={code} model={model}',flush=True)
+if os.getenv('CONSIGLIO_PROBE_AT_BOOT','0')=='1':
+    threading.Thread(target=probe_providers,daemon=True).start()
+
 app=APP
