@@ -444,6 +444,16 @@ if DB:
     init_db()
     with dbconn() as _cn:
         _cn.execute("UPDATE practices SET status='PARZIALE', error='Esecuzione interrotta dal riavvio del server' WHERE status='IN_CORSO'")
+    if os.getenv('AUDIT_SOURCE_REFS','0') == '1':
+        try:
+            with dbconn() as _cn:
+                _r = _cn.execute("SELECT sources FROM practices WHERE id=%s",('ader-pratica-principale',)).fetchone()
+            if _r and isinstance(_r[0],list):
+                for _i,_src in enumerate(_r[0]):
+                    print('CONSIGLIO_SOURCE_AUDIT index='+str(_i+1)+' status='+str(_src.get('stato',''))+' ref='+str(_src.get('riferimento',''))+' reason='+str(_src.get('motivo',''))[:100],flush=True)
+        except Exception as _e:
+            print('CONSIGLIO_SOURCE_AUDIT error='+type(_e).__name__,flush=True)
+
 # Verifica neutra dei provider, solo se attivata temporaneamente dal gestore
 # Non invia pratiche, documenti o informazioni personali.
 def probe_providers():
