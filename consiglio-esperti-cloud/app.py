@@ -535,6 +535,85 @@ def recheck_sources_route(pid):
     return jsonify(ok=True,status='IN_CORSO',mode='SOLO_FONTI'),202
 
 
+def review_verified_practice(pid):
+    """Aggiorna soltanto la revisione finale con fonti lette: una chiamata Gemini."""
+    with LOCK:RUNNING.add(pid)
+    try:
+        p=fetch_practice(pid)
+        if not p:raise RuntimeError('Fascicolo assente')
+        sources=p['sources'] or []
+        stages=dict(p['stages'] or {})
+        if len(sources)<1 or any(v.get('stato')!='TESTO CONSULTATO' for v in sources):
+            raise RuntimeError('Registro fonti ancora incompleto')
+        if sum(v.get('stato')=='COMPLETATO' for v in stages.values())!=9:
+            raise RuntimeError('Il collegio non risulta completo')
+        system=BASE.format(today=datetime.date.today().isoformat())
+        source_text='\n\n'.join(
+            'FONTE '+v['riferimento']+'\nSITO '+v.get('fonte','')+
+            '\nURL '+v.get('url','')+'\nTESTO UFFICIALE ESTRATTO:\n'+v.get('testo','')[:4000]
+            for v in sources
+        )
+        specialist_text='\n\n'.join(
+            '## '+NAMES.get(role,role)+'\n'+v.get('output','')[:4400]
+            for role,v in stages.items() if role!='revisore' and v.get('stato')=='COMPLETATO'
+        )
+        earlier=stages.get('revisore',{}).get('output','')[:3400]
+        prompt=('CASO E CRONOLOGIA RIFERITA (NON COMPROVATA DA ATTI ORIGINALI):\n'+p['quesito'][:24000]+
+                '\n\nPARERI DEL COLLEGIO:\n'+specialist_text[:42000]+
+                '\n\nREGISTRO DELLE FONTI ISTITUZIONALI E TESTI ESTRATTI:\n'+source_text[:74000]+
+                '\n\nPRECEDENTE RELAZIONE DA SOTTOPORRE A CRITICA:\n'+earlier)
+        instructions=(
+            'Sei il revisore finale indipendente. La revisione precedente era stata '
+            'prodotta senza alcuni testi normativi: devi correggerla, non ratificarla. '
+            'Non spacciare un testo consultato oggi per versione sicuramente vigente il 15/05/2026 '
+            'o il 10/08/2026; segnala differenze e controlli storici necessari. '
+            'Non inventare sentenze, norme, termini di impugnazione o interpretazioni certe. '
+            'Per ogni tesi principale indica articolo, URL istituzionale, elementi del testo '
+            'che la sostengono, controargomento, rilevanza per il caso, lacune documentali. '
+            'Distingui la legittimità del pignoramento dalla distinta questione GDPR: '
+            'base giuridica ex art. 6 e minimizzazione ex art. 5 non sono equivalenti. '
+            'Tratta separatamente riduzione agosto e conteggio successivo; non confondere le cifre. '
+            'Produci conclusione operativa con domande da porre ad AdER, atti da acquisire, '
+            'alternative e rischi; indica quali punti un avvocato dovrebbe controllare. '
+            'Rispondi in italiano con sezioni concrete, senza approvare automaticamente le tesi del debitore.')
+        result=ask('revisore',system+' '+instructions,prompt)
+        previous=dict(stages['revisore'])
+        stages['revisore']={'name':NAMES['revisore'],'provider':MODELS['revisore'][0],
+            'model':MODELS['revisore'][1],'output':result,'stato':'COMPLETATO',
+            'output_precedente':previous.get('output',''),
+            'nota':'Seconda revisione sulle fonti istituzionali consultate'}
+        final=('**Revisione automatizzata sulle fonti ufficiali consultate. '
+               'Rimane da accertare la vigenza storica delle norme nelle date del caso e '
+               'da esaminare gli atti originali.**\n\n'+result)
+        update_practice(pid,stages=stages,final=final,status='COMPLETATO',error='')
+        print('CONSIGLIO_REVIEW_VERIFIED finished sources='+str(len(sources))+' status=COMPLETATO',flush=True)
+    except Exception as e:
+        update_practice(pid,status='PARZIALE',error='Revisione sulle fonti non completata: '+type(e).__name__+': '+str(e)[:250])
+        print('CONSIGLIO_REVIEW_VERIFIED failed error_type='+type(e).__name__,flush=True)
+    finally:
+        with LOCK:RUNNING.discard(pid)
+
+
+@APP.post('/api/cases/<pid>/review-verified')
+@require_auth
+@safe_post
+def review_verified_route(pid):
+    p=fetch_practice(pid)
+    if not p:return jsonify(error='Fascicolo non trovato'),404
+    if not request.json or request.json.get('consent') is not True:
+        return jsonify(error='Serve consenso esplicito a una nuova chiamata Gemini, con possibile costo'),400
+    if not os.getenv('GEMINI_API_KEY'):return jsonify(error='Chiave Gemini assente'),409
+    if len(p['sources'] or [])<1 or not all(v.get('stato')=='TESTO CONSULTATO' for v in p['sources']):
+        return jsonify(error='Prima completare la consultazione delle fonti'),409
+    if sum(v.get('stato')=='COMPLETATO' for v in (p['stages'] or {}).values())!=9:
+        return jsonify(error='Mancano analisi del collegio'),409
+    with LOCK:
+        if pid in RUNNING or p['status']=='IN_CORSO':return jsonify(error='Elaborazione già in corso'),409
+        update_practice(pid,status='IN_CORSO',error='Revisione finale sulle fonti ufficiali in corso; i pareri originali restano salvati.')
+        EXEC.submit(review_verified_practice,pid)
+    return jsonify(ok=True,status='IN_CORSO',mode='REVISIONE_FONTI'),202
+
+
 @APP.post('/api/cases/<pid>/run')
 @require_auth
 @safe_post
@@ -588,7 +667,7 @@ INDEX='''<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="
 <section id="workspace" class="hide"><div class="action"><button class="btn secondary" onclick="showDashboard()">Archivio</button><button class="btn secondary" onclick="showNew()">Nuova istruttoria</button><button class="btn secondary" onclick="logout()">Esci</button></div><p id="status" class="muted"></p>
 <div id="dashboard"><h2>Fascicoli e stato del collegio</h2><div class="panel"><h3>Provider AI</h3><div class="grid" id="providers"></div><p class="muted">Chiave presente non significa API verificata: l'effettivo collegamento viene testato durante un'istruttoria.</p></div><div class="panel"><h3>Pratica già predisposta</h3><p>AdER: pignoramento stipendiale, rateizzazione, dati comunicati al datore e minimizzazione GDPR. Fatti riferiti, non atti originali.</p><button class="btn" onclick="seedAder()">Apri fascicolo AdER già compilato</button></div><div class="panel"><h3>Archivio istruttorie</h3><div id="cases">Nessuna pratica</div></div></div>
 <div id="new" class="panel hide"><h2>Nuova istruttoria</h2><label>Titolo</label><input id="title"><label>Quesito</label><textarea id="quesito"></textarea><div class="action"><button class="btn" onclick="createCase()">Salva fascicolo</button></div></div>
-<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><button class="btn secondary hide" id="resumebtn" onclick="resumeCase()">Recupera i soli agenti falliti</button><button class="btn secondary" id="sourcesbtn" onclick="recheckSources()">Verifica solo le fonti (senza API AI)</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
+<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><button class="btn secondary hide" id="resumebtn" onclick="resumeCase()">Recupera i soli agenti falliti</button><button class="btn secondary" id="sourcesbtn" onclick="recheckSources()">Verifica solo le fonti (senza API AI)</button><button class="btn secondary hide" id="reviewbtn" onclick="reviewVerified()">Rivedi conclusione sulle fonti (1 chiamata Gemini)</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
 </section><p class="footer">Analisi automatizzata. Le risposte non sostituiscono una consulenza professionale. La parola “verificata” è riservata a testi realmente recuperati e identificati.</p></main><script>
 let csrf='',active=null,timer=null;async function api(path,opts={}){opts.credentials='same-origin';opts.headers={...(opts.headers||{}),'Content-Type':'application/json'};if(opts.method&&opts.method!='GET')opts.headers['X-CSRF']=csrf;let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw Error(d.error||'Errore servizio');return d}
 function el(id){return document.getElementById(id)}function view(id){for(let x of ['dashboard','new','detail'])el(x).classList.toggle('hide',x!=id)}function msg(t,bad=false){el('status').textContent=t;el('status').className=bad?'error':'muted'}function err(t){el('caseerror').textContent=t}
@@ -599,7 +678,8 @@ async function showDashboard(){clearInterval(timer);view('dashboard');try{let s=
 function showNew(){clearInterval(timer);view('new')}async function seedAder(){try{let d=await api('/api/cases/ader',{method:'POST',body:'{}'});openCase(d.id)}catch(e){msg(e.message,true)}}async function createCase(){try{let d=await api('/api/cases',{method:'POST',body:JSON.stringify({title:el('title').value,quesito:el('quesito').value})});openCase(d.id)}catch(e){msg(e.message,true)}}
 function esc(s){return String(s||'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))}
 async function openCase(id){clearInterval(timer);active=id;view('detail');el('casetitle').textContent='Fascicolo';await refresh();timer=setInterval(refresh,7000)}
-async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';let stages=d.stages||{};el('runbtn').disabled=d.status=='IN_CORSO'||Object.keys(stages).length>0;el('resumebtn').classList.toggle('hide',d.status=='IN_CORSO'||!Object.values(stages).some(v=>v.stato=='ERRORE'));el('sourcesbtn').disabled=d.status=='IN_CORSO';el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';let stages=d.stages||{};el('runbtn').disabled=d.status=='IN_CORSO'||Object.keys(stages).length>0;el('resumebtn').classList.toggle('hide',d.status=='IN_CORSO'||!Object.values(stages).some(v=>v.stato=='ERRORE'));el('sourcesbtn').disabled=d.status=='IN_CORSO';el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('reviewbtn').classList.toggle('hide',d.status=='IN_CORSO'||Object.values(stages).filter(v=>v.stato=='COMPLETATO').length!=9||!sources.length||sources.some(v=>v.stato!='TESTO CONSULTATO'));el('reviewbtn').disabled=d.status=='IN_CORSO';el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function reviewVerified(){if(!el('consent').checked){err('Autorizza prima la nuova chiamata al modello AI.');return}try{await api('/api/cases/'+active+'/review-verified',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function recheckSources(){try{await api('/api/cases/'+active+'/recheck-sources',{method:'POST',body:'{}'});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function resumeCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/resume',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function runCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/run',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh()}catch(e){err(e.message)}}
