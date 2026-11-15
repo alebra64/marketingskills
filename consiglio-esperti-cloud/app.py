@@ -120,7 +120,7 @@ def ask(role,system,prompt):
             txt=(c[0].get('message',{}).get('content') or '') if c else ''
             if isinstance(txt,list):txt='\n'.join(v.get('text','') for v in txt if isinstance(v,dict))
         elif provider=='anthropic':
-            d=call_json('https://api.anthropic.com/v1/messages',{'x-api-key':key,'anthropic-version':'2023-06-01'},{'model':model,'max_tokens':tokens,'system':system,'messages':[{'role':'user','content':prompt}]})
+            d=call_json('https://api.anthropic.com/v1/messages',{'x-api-key':key,'anthropic-version':'2023-06-01'},{'model':model,'max_tokens':tokens,'system':system,'messages':[{'role':'user','content':prompt}]},timeout=180)
             txt='\n'.join(x.get('text','') for x in d.get('content',[]) if x.get('type')=='text')
         else:
             d=call_json(f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',{'x-goog-api-key':key},{'systemInstruction':{'parts':[{'text':system}]},'contents':[{'role':'user','parts':[{'text':prompt}]}],'generationConfig':{'maxOutputTokens':tokens}})
@@ -231,6 +231,77 @@ def run_practice(pid):
     finally:
         with LOCK:RUNNING.discard(pid)
 
+
+def resume_practice(pid):
+    """Riprende un'istruttoria senza cancellare i pareri acquisiti."""
+    with LOCK:RUNNING.add(pid)
+    try:
+        p=fetch_practice(pid)
+        if not p:raise RuntimeError('Fascicolo non disponibile')
+        quesito=p['quesito'];stages=dict(p['stages'] or {});verified=list(p['sources'] or []);warnings=[]
+        system=BASE.format(today=datetime.date.today().isoformat())
+        def stage(role,content):
+            stages[role]={'name':NAMES[role],'provider':MODELS[role][0],'model':MODELS[role][1],'output':content,'stato':'COMPLETATO'}
+            update_practice(pid,stages=stages)
+            print('CONSIGLIO_RESUME role='+role+' status=COMPLETATO',flush=True)
+        def fail(role,e):
+            detail=(type(e).__name__+': '+str(e))[:350]
+            stages[role]={'name':NAMES[role],'provider':MODELS[role][0],'model':MODELS[role][1],'output':'','stato':'ERRORE','errore':detail}
+            warnings.append(role+': '+detail[:120])
+            update_practice(pid,stages=stages)
+            print('CONSIGLIO_RESUME role='+role+' status=ERRORE error_type='+type(e).__name__,flush=True)
+        if stages.get('coordinatore',{}).get('stato')!='COMPLETATO':
+            try:stage('coordinatore',ask('coordinatore',system+' Sei il coordinatore. Effettua solo il triage: fatti, questioni, lacune e priorità, senza anticipare il giudizio.','CASO:\n'+quesito[:28000]))
+            except Exception as e:fail('coordinatore',e)
+        tasks={'privacy':'GDPR e provvedimenti Garante; verifica minimizzazione e necessità.',
+            'civile':'Diritto civile, procedura civile e rimedi esecutivi.',
+            'tributario':'Diritto tributario, riscossione e art. 72-bis DPR 602/1973.',
+            'amministrativo':'Diritto amministrativo, procedimento e domicilio digitale.',
+            'lavoro':'Diritto del lavoro, terzo pignorato e circolazione dei dati.'}
+        needed={role:mission for role,mission in tasks.items() if stages.get(role,{}).get('stato')!='COMPLETATO'}
+        def specialist(role,mission):
+            try:return role,ask(role,system+' Sei lo specialista indipendente: '+mission+' Non vedere i pareri degli altri. Presenta le tesi contrarie.','CASO:\n'+quesito[:28000])
+            except Exception as e:return role,e
+        if needed:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures=[pool.submit(specialist,k,v) for k,v in needed.items()]
+                for fut in concurrent.futures.as_completed(futures):
+                    role,val=fut.result()
+                    fail(role,val) if isinstance(val,Exception) else stage(role,val)
+        refs=references(quesito,{k:v.get('output','') for k,v in stages.items() if v.get('stato')=='COMPLETATO'})
+        previous={v.get('riferimento'):v for v in verified if v.get('riferimento')}
+        verified=[]
+        for ref in refs:
+            if ref in previous:
+                verified.append(previous[ref])
+            else:
+                verified.append(check_reference(ref))
+                update_practice(pid,sources=verified)
+        update_practice(pid,sources=verified)
+        evid='\n'.join(f"{x['riferimento']}: {x['stato']} | {x.get('url','')} | {x.get('testo','')[:1200] if x['stato']=='TESTO CONSULTATO' else x.get('motivo','')}" for x in verified)
+        joined='\n'.join(f"## {NAMES.get(k,k)}\n{v.get('output','')}" for k,v in stages.items() if v['stato']=='COMPLETATO')[:50000]
+        try:stage('fonti',ask('fonti',system+' Sei il VERIFICATORE: valuta criticamente il registro EFFETTIVO, non dichiarare verificato alcun riferimento non corredato di TESTO CONSULTATO. Evidenzia citazioni da eliminare o qualificare.','CASO:\n'+quesito[:12000]+'\nPARERI:\n'+joined+'\nREGISTRO FONTI:\n'+evid[:16000]))
+        except Exception as e:fail('fonti',e)
+        try:stage('contraddittorio',ask('contraddittorio',system+' Devi costruire la migliore difesa della parte avversa e individuare errori, omissioni e incongruenze nei pareri, in particolare nel rapporto tra necessità e minimizzazione.','CASO:\n'+quesito[:14000]+'\nPARERI:\n'+joined[:34000]+'\nFONTI:\n'+evid[:9000]))
+        except Exception as e:fail('contraddittorio',e)
+        completed='\n'.join(f"## {NAMES.get(k,k)}\n{v.get('output','')}" for k,v in stages.items() if v['stato']=='COMPLETATO')
+        try:stage('revisore',ask('revisore',system+' Sei revisore finale: valuta tutto, distingue obblighi da tesi, indica punti effettivamente riscontrati e punti NON VERIFICATI. Produci conclusione operativa, matrice norma/dato/necessità, cronologia, documenti mancanti e priorità. NON dichiarare parere documentato se testi ufficiali mancanti.','CASO:\n'+quesito[:14000]+'\nPARERI E CONTRADDITTORIO:\n'+completed[:48000]+'\nREGISTRO FONTI:\n'+evid[:15000]))
+        except Exception as e:fail('revisore',e)
+        ok=sum(1 for v in stages.values() if v['stato']=='COMPLETATO')
+        verified_count=sum(1 for x in verified if x['stato']=='TESTO CONSULTATO')
+        status='COMPLETATO' if ok==9 and verified_count>0 and all(x['stato']=='TESTO CONSULTATO' for x in verified) else ('PARZIALE' if ok>0 else 'ERRORE')
+        conclusion=stages.get('revisore',{}).get('output','')
+        if verified_count==0:
+            conclusion='**FONTI NON DOCUMENTATE: nessun testo normativo ufficiale recuperato. Non utilizzare come parere verificato.**\n\n'+conclusion
+        outstanding=[k+': '+v.get('errore','')[:100] for k,v in stages.items() if v.get('stato')=='ERRORE']
+        update_practice(pid,status=status,stages=stages,sources=verified,final=conclusion,error='; '.join(outstanding)[:1000])
+        print('CONSIGLIO_RESUME finished ok='+str(ok)+'/9 sources='+str(verified_count)+'/'+str(len(verified))+' status='+status,flush=True)
+    except Exception as e:
+        update_practice(pid,status='PARZIALE',error=(type(e).__name__+': '+str(e))[:400])
+        print('CONSIGLIO_RESUME aborted error_type='+type(e).__name__,flush=True)
+    finally:
+        with LOCK:RUNNING.discard(pid)
+
 @APP.get('/health')
 def health():return jsonify(status='up',database=bool(DB),configured=bool(ADMIN_HASH and APP.secret_key)),200
 
@@ -310,6 +381,21 @@ def run(pid):
         EXEC.submit(run_practice,pid)
     return jsonify(ok=True,status='IN_CORSO'),202
 
+@APP.post('/api/cases/<pid>/resume')
+@require_auth
+@safe_post
+def resume(pid):
+    p=fetch_practice(pid)
+    if not p:return jsonify(error='Fascicolo non trovato'),404
+    if not request.json or request.json.get('consent') is not True:return jsonify(error='Confermare nuovamente invio dati ai provider AI'),400
+    if not p['stages'] or not any(v.get('stato')=='ERRORE' for v in p['stages'].values()):
+        return jsonify(error='Nessun agente fallito da recuperare'),409
+    with LOCK:
+        if pid in RUNNING or p['status']=='IN_CORSO':return jsonify(error='Istruttoria già in corso'),409
+        update_practice(pid,status='IN_CORSO',error='',consent=True)
+        EXEC.submit(resume_practice,pid)
+    return jsonify(ok=True,status='IN_CORSO',mode='RECUPERO'),202
+
 @APP.get('/api/cases/<pid>/download')
 @require_auth
 def download(pid):
@@ -333,7 +419,7 @@ INDEX='''<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="
 <section id="workspace" class="hide"><div class="action"><button class="btn secondary" onclick="showDashboard()">Archivio</button><button class="btn secondary" onclick="showNew()">Nuova istruttoria</button><button class="btn secondary" onclick="logout()">Esci</button></div><p id="status" class="muted"></p>
 <div id="dashboard"><h2>Fascicoli e stato del collegio</h2><div class="panel"><h3>Provider AI</h3><div class="grid" id="providers"></div><p class="muted">Chiave presente non significa API verificata: l'effettivo collegamento viene testato durante un'istruttoria.</p></div><div class="panel"><h3>Pratica già predisposta</h3><p>AdER: pignoramento stipendiale, rateizzazione, dati comunicati al datore e minimizzazione GDPR. Fatti riferiti, non atti originali.</p><button class="btn" onclick="seedAder()">Apri fascicolo AdER già compilato</button></div><div class="panel"><h3>Archivio istruttorie</h3><div id="cases">Nessuna pratica</div></div></div>
 <div id="new" class="panel hide"><h2>Nuova istruttoria</h2><label>Titolo</label><input id="title"><label>Quesito</label><textarea id="quesito"></textarea><div class="action"><button class="btn" onclick="createCase()">Salva fascicolo</button></div></div>
-<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
+<div id="detail" class="hide"><h2 id="casetitle"></h2><div class="panel"><p id="casestate"></p><details><summary>Quesito completo</summary><pre id="casequestion"></pre></details><div class="action"><label style="font-weight:400"><input id="consent" type="checkbox" style="width:auto"> Autorizzo l'invio del quesito ai tre fornitori AI (OpenAI, Anthropic, Google).</label><button class="btn" id="runbtn" onclick="runCase()">Avvia collegio</button><button class="btn secondary hide" id="resumebtn" onclick="resumeCase()">Recupera i soli agenti falliti</button><a class="btn secondary" id="download" href="#">Scarica rapporto</a></div><p class="muted">L'esecuzione può comportare costi API. Fonti e pareri sono verificati separatamente.</p><p id="caseerror" class="error"></p></div><div class="panel"><h3>Agenti e stato</h3><div id="stages" class="stages grid"></div></div><div class="panel"><h3>Fonti ufficiali</h3><div id="sources"></div></div><div class="panel"><h3>Rapporto conclusivo</h3><pre id="final"></pre></div></div>
 </section><p class="footer">Analisi automatizzata. Le risposte non sostituiscono una consulenza professionale. La parola “verificata” è riservata a testi realmente recuperati e identificati.</p></main><script>
 let csrf='',active=null,timer=null;async function api(path,opts={}){opts.credentials='same-origin';opts.headers={...(opts.headers||{}),'Content-Type':'application/json'};if(opts.method&&opts.method!='GET')opts.headers['X-CSRF']=csrf;let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw Error(d.error||'Errore servizio');return d}
 function el(id){return document.getElementById(id)}function view(id){for(let x of ['dashboard','new','detail'])el(x).classList.toggle('hide',x!=id)}function msg(t,bad=false){el('status').textContent=t;el('status').className=bad?'error':'muted'}function err(t){el('caseerror').textContent=t}
@@ -344,7 +430,8 @@ async function showDashboard(){clearInterval(timer);view('dashboard');try{let s=
 function showNew(){clearInterval(timer);view('new')}async function seedAder(){try{let d=await api('/api/cases/ader',{method:'POST',body:'{}'});openCase(d.id)}catch(e){msg(e.message,true)}}async function createCase(){try{let d=await api('/api/cases',{method:'POST',body:JSON.stringify({title:el('title').value,quesito:el('quesito').value})});openCase(d.id)}catch(e){msg(e.message,true)}}
 function esc(s){return String(s||'').replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))}
 async function openCase(id){clearInterval(timer);active=id;view('detail');el('casetitle').textContent='Fascicolo';await refresh();timer=setInterval(refresh,7000)}
-async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';el('runbtn').disabled=d.status=='IN_CORSO';let stages=d.stages||{};el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function refresh(){if(!active)return;try{let d=await api('/api/cases/'+active);el('casetitle').textContent=d.title;el('casestate').textContent='Esito: '+d.status;el('casequestion').textContent=d.quesito;el('final').textContent=d.final||'Non ancora prodotto';el('caseerror').textContent=d.error||'';el('download').href='/api/cases/'+d.id+'/download';let stages=d.stages||{};el('runbtn').disabled=d.status=='IN_CORSO'||Object.keys(stages).length>0;el('resumebtn').classList.toggle('hide',d.status=='IN_CORSO'||!Object.values(stages).some(v=>v.stato=='ERRORE'));el('stages').innerHTML=Object.entries(stages).map(([id,v])=>`<div class="stage"><b>${esc(v.name)}</b><br><small>${esc(v.provider)} · ${esc(v.stato)}</small>${v.errore?'<p class="error">'+esc(v.errore)+'</p>':''}<details><summary>Leggi analisi</summary><pre>${esc(v.output)}</pre></details></div>`).join('')||'Nessun agente avviato';let sources=d.sources||[];el('sources').innerHTML=sources.map(v=>`<div class="stage"><b>${esc(v.riferimento)}</b> · ${esc(v.stato)}<br><small>${esc(v.url||v.motivo||'')}</small>${v.testo?'<details><summary>Testo acquisito</summary><pre>'+esc(v.testo)+'</pre></details>':''}</div>`).join('')||'Nessuna fonte verificata';if(['COMPLETATO','PARZIALE','ERRORE'].includes(d.status))clearInterval(timer)}catch(e){msg(e.message,true)}}
+async function resumeCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/resume',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh();clearInterval(timer);timer=setInterval(refresh,7000)}catch(e){err(e.message)}}
 async function runCase(){if(!el('consent').checked){err('Occorre autorizzare l’invio ai provider.');return}try{await api('/api/cases/'+active+'/run',{method:'POST',body:JSON.stringify({consent:true})});err('');await refresh()}catch(e){err(e.message)}}
 init();el('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login()});
 </script></body></html>'''
