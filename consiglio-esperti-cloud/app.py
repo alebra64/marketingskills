@@ -370,7 +370,7 @@ def probe_providers():
             result=ask(role,'Questo è un test puramente tecnico. Rispondi con la sola parola OK.','Scrivi OK.')
             print(f'CONSIGLIO_PROBE provider={provider} result=SUCCESS nonempty={bool(result.strip())} model={model}',flush=True)
         except Exception as exc:
-            status=re.search(r'HTTP\\s+\\d{3}',str(exc))
+            status=re.search(r'HTTP\s+\d{3}',str(exc))
             code=status.group(0) if status else type(exc).__name__
             print(f'CONSIGLIO_PROBE provider={provider} result=FAILED error_type={code} model={model}',flush=True)
 if os.getenv('CONSIGLIO_PROBE_AT_BOOT','0')=='1':
