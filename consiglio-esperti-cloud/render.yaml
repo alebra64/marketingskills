@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: consiglio-esperti-cloud
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: consiglio-esperti-cloud
+    rootDir: consiglio-esperti-cloud
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: consiglio-esperti-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD_HASH
+        sync: false
+databases:
+  - name: consiglio-esperti-db
+    plan: free
+    region: frankfurt
+    databaseName: consiglio_esperti_db
