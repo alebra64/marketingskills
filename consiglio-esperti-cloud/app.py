@@ -585,4 +585,20 @@ def probe_providers():
 if os.getenv('CONSIGLIO_PROBE_AT_BOOT','0')=='1':
     threading.Thread(target=probe_providers,daemon=True).start()
 
+
+def normattiva_probe():
+    urls=[
+        'https://www.normattiva.it/eli/id/1973/10/16/073U0602/CONSOLIDATED/20261115',
+        'https://www.normattiva.it/uri-res/N2Ls?urn:nir:stato:decreto.del.presidente.della.repubblica:1973-09-29;602~art72bis!vig=2026-11-15'
+    ]
+    for url in urls:
+        try:
+            with build_opener().open(Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html'}),timeout=12) as rr:
+                raw=rr.read(1_000_000)
+                print('CONSIGLIO_NORM_PROBE ok host='+str(rr.geturl().split('/')[2])+' status='+str(rr.status)+' bytes='+str(len(raw))+' article_words='+str(raw.lower().count(b'pignoramento'))+' code_72='+str(raw.lower().count(b'72-bis')),flush=True)
+        except Exception as e:
+            print('CONSIGLIO_NORM_PROBE error='+type(e).__name__+' detail='+str(e)[:130],flush=True)
+if os.getenv('NORMATTIVA_PROBE_AT_BOOT','0')=='1':
+    threading.Thread(target=normattiva_probe,daemon=True).start()
+
 app=APP
