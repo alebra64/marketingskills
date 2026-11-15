@@ -200,8 +200,64 @@ def verify_italian_article(ref):
             return {'riferimento':normalized,'stato':'TESTO CONSULTATO','fonte':urlsplit(dest).hostname,'url':dest,'testo':article,'data_consultazione':datetime.datetime.now(datetime.timezone.utc).isoformat(),'avviso':'Consultazione di testo istituzionale; la vigenza alla data dei fatti deve essere controllata separatamente'}
         except Exception as e:
             errors.append(urlsplit(url).hostname+': '+type(e).__name__+': '+str(e)[:70])
-    result['motivo']=' ; '.join(errors)[:310]
+    alt=read_normattiva_article(normalized)
+    if alt.get('stato')=='TESTO CONSULTATO':return alt
+    result['motivo']=' ; '.join(errors)[:190]+' | Normattiva: '+alt.get('motivo','')[:170]
+    result['url']=alt.get('url',result.get('url'))
     return result
+
+
+def read_normattiva_article(ref):
+    """Testo articolo da Normattiva; il solo indice non basta per la verifica."""
+    from urllib.parse import urlsplit
+    ref=canonical_ref(ref)
+    m=re.fullmatch(r'art\.\s*(\d{1,3})(-bis|-ter)?\s*(DPR 602/1973|c\.p\.c\.)',ref,re.I)
+    x={'riferimento':ref,'stato':'NON VERIFICATA','motivo':'Testo Normattiva non recuperato'}
+    if not m:return x
+    n=int(m.group(1));ext=(m.group(2) or '').lower()
+    dpr='602' in m.group(3)
+    urn_base=('urn:nir:stato:decreto.del.presidente.della.repubblica:1973-09-29;602' if dpr else 'urn:nir:stato:regio.decreto:1940-10-28;1443')
+    suffix='~art'+str(n)+(ext[1:] if ext else '')+'!vig='+datetime.date.today().isoformat()
+    prefixes=[urn_base] if dpr else [urn_base+':1',urn_base]
+    errors=[]
+    for pre in prefixes:
+        url='https://www.normattiva.it/uri-res/N2Ls?'+pre+suffix
+        x['url']=url
+        try:
+            with build_opener().open(Request(url,headers={'User-Agent':'Mozilla/5.0','Accept':'text/html'}),timeout=18) as rr:
+                dest=rr.geturl()
+                if urlsplit(dest).hostname not in ('www.normattiva.it','normattiva.it'):
+                    raise ValueError('Redirect fuori Normattiva')
+                raw=rr.read(4_000_000)
+            soup=BeautifulSoup(raw,'html.parser')
+            for tag in soup(['script','style','nav','footer','aside']):tag.decompose()
+            lines=[re.sub(r'\s+',' ',v).strip() for v in soup.get_text('\n',strip=True).splitlines()]
+            lines=[v for v in lines if v]
+            heading=' '.join(lines[:130]).lower()
+            if dpr and ('602' not in heading or '1973' not in heading):
+                raise ValueError('Identità del DPR 602/1973 non riscontrata')
+            if not dpr and 'codice di procedura civile' not in heading:
+                raise ValueError('Identità del codice di procedura civile non riscontrata')
+            wanted=re.compile(r'Art\.\s*'+str(n)+r'(?:[\s-]*'+ext[1:]+r')?\s*\.?$',re.I) if ext else re.compile(r'Art\.\s*'+str(n)+r'\s*\.?$',re.I)
+            found=None
+            for i,v in enumerate(lines):
+                if not wanted.fullmatch(v):continue
+                end=next((j for j in range(i+1,len(lines)) if re.fullmatch(r'Art\.\s*\d{1,4}(?:[-\s]*(?:bis|ter))?\.?',lines[j],re.I)),len(lines))
+                section='\n'.join(lines[i:end]).strip()
+                if 160<=len(section)<=45000 and re.search(r'\b1\s*\.',section):
+                    found=section
+            if not found:raise ValueError('Pagina aperta ma articolo non isolato')
+            expected={
+                '72-bis':('pignoramento','terzi'), '19':('rate','dilazione'),
+                '57':('opposizioni','esecuzione'), '26':('cartella','notific'),
+                '49':('espropriazion','riscossion'), '545':('pignora','stipend'),
+                '617':('opposizion','atti'), '615':('opposizion','esecuzion')}
+            if not all(word in found.lower() for word in expected.get(str(n)+ext,())):
+                raise ValueError('Contenuto non coerente con articolo e rubrica')
+            return {'riferimento':ref,'stato':'TESTO CONSULTATO','fonte':'www.normattiva.it','url':dest,'testo':found,'data_consultazione':datetime.datetime.now(datetime.timezone.utc).isoformat(),'versione_richiesta':datetime.date.today().isoformat(),'avviso':'Testo dell’articolo recuperato; valutare la vigenza alle diverse date della pratica e la giurisprudenza'}
+        except Exception as e:errors.append(type(e).__name__+': '+str(e)[:95])
+    x['motivo']=' ; '.join(errors)[:350]
+    return x
 
 def check_reference(ref):
     """Segna TESTO CONSULTATO solo se l'articolo esatto è stato letto dal sito ufficiale."""
