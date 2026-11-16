@@ -694,6 +694,22 @@ if DB:
     init_db()
     with dbconn() as _cn:
         _cn.execute("UPDATE practices SET status='PARZIALE', error='Esecuzione interrotta dal riavvio del server' WHERE status='IN_CORSO'")
+    # Audit privato e minimale: solo conteggi e stato, senza contenuti del fascicolo.
+    try:
+        _p=fetch_practice('ader-pratica-principale')
+        if _p:
+            _sg=_p.get('stages') or {}
+            _sr=_p.get('sources') or []
+            _ok=sum(v.get('stato')=='COMPLETATO' for v in _sg.values())
+            _refs=sum(v.get('stato')=='TESTO CONSULTATO' and bool(v.get('testo')) for v in _sr)
+            _second=bool(_sg.get('revisore',{}).get('nota')=='Seconda revisione sulle fonti istituzionali consultate')
+            print('CONSIGLIO_STATUS_AUDIT status='+str(_p['status'])+
+                  ' agents='+str(_ok)+'/'+str(len(_sg))+
+                  ' sources='+str(_refs)+'/'+str(len(_sr))+
+                  ' final_present='+str(bool(_p.get('final'))) +
+                  ' second_review='+str(_second),flush=True)
+    except Exception as _audit_error:
+        print('CONSIGLIO_STATUS_AUDIT error_type='+type(_audit_error).__name__,flush=True)
     if os.getenv('SOURCE_RECHECK_AT_BOOT','0')=='1':
         threading.Thread(target=recheck_sources,args=('ader-pratica-principale',),daemon=True).start()
 
