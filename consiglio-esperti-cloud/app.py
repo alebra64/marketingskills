@@ -723,6 +723,68 @@ if DB:
         except Exception as _e:
             print('CONSIGLIO_SOURCE_AUDIT error='+type(_e).__name__,flush=True)
 
+
+def coordinatore_indicazioni_utilizzo():
+    """Interroga il coordinatore sul rapporto completo, senza modificare il rapporto stesso."""
+    try:
+        p=fetch_practice('ader-pratica-principale')
+        if not p or p.get('status')!='COMPLETATO':
+            print('CONSIGLIO_COORD_USAGE error=REPORT_NOT_COMPLETE',flush=True)
+            return
+        stages=dict(p.get('stages') or {})
+        if stages.get('coordinatore',{}).get('indicazioni_uso_rapporto'):
+            orientamento=stages['coordinatore']['indicazioni_uso_rapporto']
+            print('CONSIGLIO_COORD_USAGE cached=true',flush=True)
+        else:
+            registro='\n'.join(
+                str(i+1)+'. '+x.get('riferimento','')+' | '+x.get('stato','')+' | '+x.get('url','')
+                for i,x in enumerate(p.get('sources') or [])
+            )
+            altri='\n\n'.join(
+                'SEZIONE '+NAMES.get(k,k)+'\n'+v.get('output','')[:3100]
+                for k,v in stages.items() if k in ('privacy','tributario','amministrativo','fonti','contraddittorio','revisore')
+            )
+            system=(BASE.format(today=datetime.date.today().isoformat())+
+              " Sei il COORDINATORE del Consiglio degli Esperti. Stai rispondendo direttamente "+
+              "all'utente tramite un portavoce, e devi riferire solo ciò che emerge dal rapporto "+
+              "finale e dai pareri documentati, non introdurre tue nuove ricerche o congetture. "+
+              "Rispondi alla domanda precisa: 'Questo rapporto cosa indica e come devo utilizzarlo?'. "+
+              "Concentrati sulla contestazione della comunicazione eccedente di dati personali ad opera "+
+              "di AdER verso il datore di lavoro (principio di minimizzazione GDPR). "+
+              "NON attribuire all'utente l'intento di contestare il diritto di AdER di pignorare "+
+              "lo stipendio: non è l'oggetto della sua richiesta. Se il rapporto contiene profili "+
+              "aggiuntivi, distinguile e non cambiare l'oggetto. "+
+              "Cita nel testo le sezioni precise o passaggi del rapporto cui ti riferisci. "+
+              "Distingui sempre passi consigliati, condizioni documentali, limiti e rischi. "+
+              "Non suggerire che il rapporto da solo provi un illecito né asserire esiti certi.")
+            prompt=("DOMANDA DELL'UTENTE:\nVisto che il consiglio ha un coordinatore "+
+                "che è al corrente del rapporto, riferiscimi cosa dice in relazione al modo "+
+                "in cui utilizzare il rapporto.\n\n"+
+                "QUESITO ORIGINARIO:\n"+p['quesito'][:17000]+
+                "\n\nRAPPORTO CONCLUSIVO DOPO REVISIONE FINALE:\n"+p.get('final','')[:60000]+
+                "\n\nREGISTRO FONTI VERIFICATE:\n"+registro[:12000]+
+                "\n\nALTRI PARERI DEL COLLEGIO (ESTRATTI):\n"+altri[:23000]+
+                "\n\nISTRUZIONE DI RISPOSTA: Spiega specificamente e in ordine "+
+                "quali utilizzi concreti sono sostenuti dal rapporto, verso chi, "+
+                "con quali documenti e verifiche preliminari, quali limitazioni; "+
+                "non prescrivere azioni non supportate dal rapporto.")
+            orientamento=ask('coordinatore',system,prompt)
+            coord=dict(stages.get('coordinatore') or {})
+            coord['indicazioni_uso_rapporto']=orientamento
+            coord['indicazioni_uso_data']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+            stages['coordinatore']=coord
+            update_practice('ader-pratica-principale',stages=stages)
+            print('CONSIGLIO_COORD_USAGE saved=true length='+str(len(orientamento)),flush=True)
+        parts=[orientamento[i:i+650] for i in range(0,len(orientamento),650)]
+        for i,part in enumerate(parts,1):
+            print('CONSIGLIO_COORD_USAGE_TEXT '+str(i)+'/'+str(len(parts))+' '+part.replace('\n','⏎'),flush=True)
+        print('CONSIGLIO_COORD_USAGE_END total='+str(len(parts)),flush=True)
+    except Exception as e:
+        print('CONSIGLIO_COORD_USAGE error_type='+type(e).__name__+' message='+str(e)[:150],flush=True)
+
+if DB and os.getenv('COORD_USAGE_AT_BOOT','0')=='1':
+    threading.Thread(target=coordinatore_indicazioni_utilizzo,daemon=True).start()
+
 # Verifica neutra dei provider, solo se attivata temporaneamente dal gestore
 # Non invia pratiche, documenti o informazioni personali.
 def probe_providers():
