@@ -203,5 +203,13 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
                    else 'VERDETTO_DA_LEGGERE')
         print('CONSIGLIO_RECLAMO_STATUS saved=true stages='+str(len(_job.get('stages') or {}))+
           ' chars='+str(len(_job.get('final') or ''))+' approval='+_decision,flush=True)
+    if _job and _job.get('status')=='REVISIONATO' and os.getenv('RECLAMO_AUDIT_APPROVAL','0')=='1':
+        # Solo spiegazione del Coordinatore; eventuali dati identificativi mascherati nei log.
+        import re
+        _txt=(_job.get('approval') or '')
+        _txt=re.sub(r'[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}', '[EMAIL]', _txt)
+        _txt=re.sub(r'\b[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\b','[CF]',_txt)
+        for _i in range(0,len(_txt),380):
+            print('CONSIGLIO_RECLAMO_APPROVAL_TEXT '+str(_i//380+1)+' '+_txt[_i:_i+380].replace('\n','⏎'),flush=True)
     if os.getenv('RECLAMO_DRAFT_AT_BOOT','0')=='1':
         threading.Thread(target=run_job,daemon=True).start()
