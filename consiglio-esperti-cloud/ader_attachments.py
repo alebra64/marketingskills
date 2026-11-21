@@ -80,7 +80,7 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
                 "riferimenti normativi e istruzioni; indica a quale foto appartiene ogni dato. Segnala "
                 "le parti illeggibili o dubbie senza ricostruirle. Confronta i dati con il quesito e "
                 "separa corrispondenze, differenze e verifiche necessarie. Non dare conclusioni "
-                "giuridiche definitive. Rispondi in modo conciso.\\n\\nQUESITO:\\n"
+                "giuridiche definitive. Rispondi in modo conciso.\n\nQUESITO:\n"
                 +str(p.get('quesito',''))[:8000]
             )}]
             for slot,ctype,body in rows:
