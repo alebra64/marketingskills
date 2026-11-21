@@ -184,6 +184,24 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
         if not job or not job['final']:return jsonify(error='Reclamo non ancora disponibile'),404
         return jsonify(status=job['status'],testo=job['final'],verifica=job['issues'],coordinatore=job['approval'])
 
+    @APP.get('/api/cases/<pid>/reclamo/atto')
+    @require_auth
+    def reclamo_atto(pid):
+        if pid!=CASE_ID:return jsonify(error='Non trovato'),404
+        job=get_job()
+        if not job or not job['final']:return jsonify(error='Bozza non ancora disponibile'),404
+        return Response(job['final'],mimetype='text/markdown; charset=utf-8',
+          headers={'Content-Disposition':'attachment; filename="Atto_Reclamo_Garante_AdER_BOZZA.md"',
+                   'Cache-Control':'private, no-store'})
+
     ensure_table()
+    _job=get_job()
+    if _job and _job.get('status')=='REVISIONATO':
+        _approval=(_job.get('approval') or '').upper()[:600]
+        _decision=('NON_APPROVABILE' if 'NON APPROVABILE' in _approval or 'NON APPROVABILE' in _approval
+                   else 'APPROVABILE_COME_BOZZA' if 'APPROVABILE COME BOZZA' in _approval
+                   else 'VERDETTO_DA_LEGGERE')
+        print('CONSIGLIO_RECLAMO_STATUS saved=true stages='+str(len(_job.get('stages') or {}))+
+          ' chars='+str(len(_job.get('final') or ''))+' approval='+_decision,flush=True)
     if os.getenv('RECLAMO_DRAFT_AT_BOOT','0')=='1':
         threading.Thread(target=run_job,daemon=True).start()
