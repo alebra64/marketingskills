@@ -88,7 +88,7 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
             payload={'contents':[{'role':'user','parts':parts}],
                 'generationConfig':{'maxOutputTokens':8000,'temperature':0.1}}
             req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
-                os.getenv('MODEL_DOCUMENTI','gemini-2.5-flash')+':generateContent',
+                'gemini-3.8-flash'+':generateContent',
                 data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
                 headers={'Content-Type':'application/json','Accept':'application/json','x-goog-api-key':key},method='POST')
             try:
@@ -105,7 +105,7 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
             stages=dict(p.get('stages') or {})
             previous=stages.get('documenti_originali',{})
             stage={'name':'Lettura delle tre fotografie originali AdER','provider':'gemini',
-                'model':os.getenv('MODEL_DOCUMENTI','gemini-2.5-flash'),'output':output.strip(),
+                'model':'gemini-3.8-flash','output':output.strip(),
                 'stato':'COMPLETATO','nota':'Foto e quesito inviati a Gemini dopo consenso esplicito'}
             if previous.get('output'):stage['output_precedente']=previous['output']
             stages['documenti_originali']=stage
