@@ -75,18 +75,18 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
             p=fetch_practice(pid)
             if not p:return jsonify(error='Fascicolo non trovato'),404
             parts=[{'text':(
-                "Leggi le tre fotografie di un atto AdER in ordine. Trascrivi con precisione i passaggi "
-                "leggibili, indicando pagina/foto e citazioni testuali. Elenca dati, importi, date, "
-                "destinatari, riferimenti normativi e istruzioni presenti nell’atto. Segnala ogni parte "
-                "illeggibile o incerta senza completarla per supposizione. Confronta i dati visibili con "
-                "il quesito riportato sotto, distinguendo corrispondenze, differenze e punti da verificare. "
-                "Non formulare conclusioni giuridiche definitive e non inventare contenuti.\n\nQUESITO:\n"
-                +str(p.get('quesito',''))[:16000]
+                "Esamina le tre foto dell’atto AdER nell’ordine. Fornisci una lettura essenziale e precisa: "
+                "trascrivi le parti leggibili utili a identificare atto, date, importi, destinatari, "
+                "riferimenti normativi e istruzioni; indica a quale foto appartiene ogni dato. Segnala "
+                "le parti illeggibili o dubbie senza ricostruirle. Confronta i dati con il quesito e "
+                "separa corrispondenze, differenze e verifiche necessarie. Non dare conclusioni "
+                "giuridiche definitive. Rispondi in modo conciso.\\n\\nQUESITO:\\n"
+                +str(p.get('quesito',''))[:8000]
             )}]
             for slot,ctype,body in rows:
                 parts.append({'inlineData':{'mimeType':ctype,'data':base64.b64encode(bytes(body)).decode('ascii')}})
             payload={'contents':[{'role':'user','parts':parts}],
-                'generationConfig':{'maxOutputTokens':8000,'temperature':0.1}}
+                'generationConfig':{'maxOutputTokens':4000,'temperature':0.1}}
             req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
                 'gemini-3.8-flash'+':generateContent',
                 data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
