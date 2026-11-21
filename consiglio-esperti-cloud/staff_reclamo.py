@@ -100,7 +100,7 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
                 except Exception as primary_error:
                     # Conserva incarico professionale, ma usa un diverso modello tecnico
                     # se Anthropic non restituisce testo; non inventa esiti del modello originario.
-                    if role not in ('privacy','amministrativo','contraddittorio'):
+                    if role=='coordinatore':
                         raise
                     used_role='coordinatore'
                     print('CONSIGLIO_RECLAMO step='+step+' primary_failed='+type(primary_error).__name__+' backup_provider=openai',flush=True)
