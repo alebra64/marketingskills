@@ -88,18 +88,29 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
             payload={'contents':[{'role':'user','parts':parts}],
                 'generationConfig':{'maxOutputTokens':4000,'temperature':0.1}}
             req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
-                'gemini-3.8-flash'+':generateContent',
+                'gemini-3.8-flash'+':streamGenerateContent?alt=sse',
                 data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
-                headers={'Content-Type':'application/json','Accept':'application/json','x-goog-api-key':key},method='POST')
+                headers={'Content-Type':'application/json','Accept':'text/event-stream','x-goog-api-key':key},method='POST')
+            chunks=[]
             try:
-                with urlopen(req,timeout=180) as resp: result=json.loads(resp.read(5_000_000).decode('utf-8'))
+                with urlopen(req,timeout=120) as resp:
+                    for rawline in resp:
+                        line=rawline.decode('utf-8','replace').strip()
+                        if not line.startswith('data:'):continue
+                        data=line[5:].strip()
+                        if not data or data=='[DONE]':continue
+                        try:event=json.loads(data)
+                        except ValueError:continue
+                        for candidate in event.get('candidates',[]):
+                            for part in candidate.get('content',{}).get('parts',[]):
+                                if isinstance(part,dict) and isinstance(part.get('text'),str):
+                                    chunks.append(part['text'])
             except HTTPError as exc:
                 detail=exc.read(500).decode('utf-8','replace')
                 return jsonify(error='Gemini ha rifiutato la lettura (HTTP '+str(exc.code)+'): '+detail[:180]),502
             except (URLError,TimeoutError,OSError) as exc:
                 return jsonify(error='Errore di collegamento a Gemini: '+type(exc).__name__),502
-            candidates=result.get('candidates',[])
-            output='\n'.join(x.get('text','') for x in (candidates[0].get('content',{}).get('parts',[]) if candidates else []) if isinstance(x,dict))
+            output=''.join(chunks)
             if not output.strip():
                 return jsonify(error='Gemini non ha restituito una lettura. Le foto restano conservate nel fascicolo.'),502
             stages=dict(p.get('stages') or {})
