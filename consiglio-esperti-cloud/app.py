@@ -828,3 +828,7 @@ if os.getenv('NORMATTIVA_PROBE_AT_BOOT','0')=='1':
     threading.Thread(target=normattiva_probe,daemon=True).start()
 
 app=APP
+
+# Incarico al collegio per il reclamo riservato al Garante Privacy.
+from staff_reclamo import register as register_staff_reclamo
+register_staff_reclamo(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES)
