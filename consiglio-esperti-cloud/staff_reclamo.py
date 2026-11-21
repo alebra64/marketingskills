@@ -94,8 +94,18 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
                     print('CONSIGLIO_RECLAMO step='+step+' cached=true',flush=True)
                     return stages[step]['output']
                 print('CONSIGLIO_RECLAMO step='+step+' status=START',flush=True)
-                output=ask(role,system+' '+base+' '+mission,input_text)
-                stages[step]={'role':role,'stato':'COMPLETATO','output':output,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+                used_role=role
+                try:
+                    output=ask(role,system+' '+base+' '+mission,input_text)
+                except Exception as primary_error:
+                    # Conserva incarico professionale, ma usa un diverso modello tecnico
+                    # se Anthropic non restituisce testo; non inventa esiti del modello originario.
+                    if role not in ('privacy','amministrativo','contraddittorio'):
+                        raise
+                    used_role='coordinatore'
+                    print('CONSIGLIO_RECLAMO step='+step+' primary_failed='+type(primary_error).__name__+' backup_provider=openai',flush=True)
+                    output=ask('coordinatore',system+' '+base+' Agisci come specialista '+role+'. '+mission,input_text[:38000])
+                stages[step]={'role':role,'provider_effettivo':used_role,'stato':'COMPLETATO','output':output,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
                 patch(stages=stages)
                 print('CONSIGLIO_RECLAMO step='+step+' status=COMPLETATO chars='+str(len(output)),flush=True)
                 return output
