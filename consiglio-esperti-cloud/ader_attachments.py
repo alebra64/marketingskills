@@ -88,9 +88,9 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
             payload={'contents':[{'role':'user','parts':parts}],
                 'generationConfig':{'maxOutputTokens':8000,'temperature':0.1}}
             req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
-                os.getenv('MODEL_DOCUMENTI','gemini-2.5-flash')+':generateContent?key='+key,
+                os.getenv('MODEL_DOCUMENTI','gemini-2.5-flash')+':generateContent',
                 data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
-                headers={'Content-Type':'application/json','Accept':'application/json'},method='POST')
+                headers={'Content-Type':'application/json','Accept':'application/json','x-goog-api-key':key},method='POST')
             try:
                 with urlopen(req,timeout=180) as resp: result=json.loads(resp.read(5_000_000).decode('utf-8'))
             except HTTPError as exc:
