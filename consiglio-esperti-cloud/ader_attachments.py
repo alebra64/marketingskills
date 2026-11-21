@@ -87,36 +87,52 @@ def register(app, dbconn, require_auth, safe_post, fetch_practice, update_practi
                 parts.append({'inlineData':{'mimeType':ctype,'data':base64.b64encode(bytes(body)).decode('ascii')}})
             payload={'contents':[{'role':'user','parts':parts}],
                 'generationConfig':{'maxOutputTokens':4000,'temperature':0.1}}
-            req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
-                'gemini-3.8-flash'+':streamGenerateContent?alt=sse',
-                data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
-                headers={'Content-Type':'application/json','Accept':'text/event-stream','x-goog-api-key':key},method='POST')
-            chunks=[]
-            try:
-                with urlopen(req,timeout=120) as resp:
-                    for rawline in resp:
-                        line=rawline.decode('utf-8','replace').strip()
-                        if not line.startswith('data:'):continue
-                        data=line[5:].strip()
-                        if not data or data=='[DONE]':continue
-                        try:event=json.loads(data)
-                        except ValueError:continue
-                        for candidate in event.get('candidates',[]):
-                            for part in candidate.get('content',{}).get('parts',[]):
-                                if isinstance(part,dict) and isinstance(part.get('text'),str):
-                                    chunks.append(part['text'])
-            except HTTPError as exc:
-                detail=exc.read(500).decode('utf-8','replace')
-                return jsonify(error='Gemini ha rifiutato la lettura (HTTP '+str(exc.code)+'): '+detail[:180]),502
-            except (URLError,TimeoutError,OSError) as exc:
-                return jsonify(error='Errore di collegamento a Gemini: '+type(exc).__name__),502
-            output=''.join(chunks)
+            models=('gemini-3.8-flash','gemini-3.5-flash-lite')
+            output=''
+            used_model=''
+            last_error=''
+            for model_name in models:
+                req=Request('https://generativelanguage.googleapis.com/v1beta/models/'+
+                    model_name+':streamGenerateContent?alt=sse',
+                    data=json.dumps(payload,ensure_ascii=False).encode('utf-8'),
+                    headers={'Content-Type':'application/json','Accept':'text/event-stream','x-goog-api-key':key},method='POST')
+                chunks=[]
+                try:
+                    with urlopen(req,timeout=120) as resp:
+                        for rawline in resp:
+                            line=rawline.decode('utf-8','replace').strip()
+                            if not line.startswith('data:'):continue
+                            data=line[5:].strip()
+                            if not data or data=='[DONE]':continue
+                            try:event=json.loads(data)
+                            except ValueError:continue
+                            for candidate in event.get('candidates',[]):
+                                for part in candidate.get('content',{}).get('parts',[]):
+                                    if isinstance(part,dict) and isinstance(part.get('text'),str):
+                                        chunks.append(part['text'])
+                except HTTPError as exc:
+                    detail=exc.read(500).decode('utf-8','replace')
+                    last_error='HTTP '+str(exc.code)+': '+detail[:180]
+                    if exc.code in (429,500,502,503,504) and model_name!=models[-1]:
+                        continue
+                    return jsonify(error='Gemini ha rifiutato la lettura ('+last_error+')'),502
+                except (URLError,TimeoutError,OSError) as exc:
+                    last_error=type(exc).__name__
+                    if model_name!=models[-1]:continue
+                    return jsonify(error='Errore di collegamento a Gemini: '+last_error),502
+                output=''.join(chunks)
+                if output.strip():
+                    used_model=model_name
+                    break
+                last_error='risposta vuota'
+            if not output.strip():
+                return jsonify(error='Gemini non ha completato la lettura. Ultimo esito: '+last_error),502
             if not output.strip():
                 return jsonify(error='Gemini non ha restituito una lettura. Le foto restano conservate nel fascicolo.'),502
             stages=dict(p.get('stages') or {})
             previous=stages.get('documenti_originali',{})
             stage={'name':'Lettura delle tre fotografie originali AdER','provider':'gemini',
-                'model':'gemini-3.8-flash','output':output.strip(),
+                'model':used_model,'output':output.strip(),
                 'stato':'COMPLETATO','nota':'Foto e quesito inviati a Gemini dopo consenso esplicito'}
             if previous.get('output'):stage['output_precedente']=previous['output']
             stages['documenti_originali']=stage
