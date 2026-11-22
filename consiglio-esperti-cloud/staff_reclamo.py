@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, datetime, threading, json
 from functools import wraps
-from flask import jsonify, Response
+from flask import jsonify, Response, request
 
 CASE_ID='ader-pratica-principale'
 JOB_ID='reclamo-garante-ader'
@@ -23,6 +23,7 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 stages JSONB NOT NULL DEFAULT '{}'::jsonb,
+                history JSONB NOT NULL DEFAULT '[]'::jsonb,
                 final TEXT NOT NULL DEFAULT '',
                 issues TEXT NOT NULL DEFAULT '',
                 approval TEXT NOT NULL DEFAULT ''
@@ -30,19 +31,19 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
 
     def get_job():
         with dbconn() as cn:
-            r=cn.execute('SELECT status,stages,final,issues,approval,updated_at FROM reclamo_staff WHERE id=%s',(JOB_ID,)).fetchone()
+            r=cn.execute('SELECT status,stages,final,issues,approval,updated_at,history FROM reclamo_staff WHERE id=%s',(JOB_ID,)).fetchone()
         if not r:return None
-        return dict(zip(('status','stages','final','issues','approval','updated_at'),r))
+        return dict(zip(('status','stages','final','issues','approval','updated_at','history'),r))
 
     def patch(**kwargs):
-        fields=', '.join(k+'=%s'+('::jsonb' if k=='stages' else '') for k in kwargs)
-        vals=[json.dumps(v,ensure_ascii=False) if k=='stages' else v for k,v in kwargs.items()]
+        fields=', '.join(k+'=%s'+('::jsonb' if k in ('stages','history') else '') for k in kwargs)
+        vals=[json.dumps(v,ensure_ascii=False) if k in ('stages','history') else v for k,v in kwargs.items()]
         with dbconn() as cn:
             cn.execute('UPDATE reclamo_staff SET '+fields+',updated_at=now() WHERE id=%s',(*vals,JOB_ID))
 
-    def run_job():
+    def run_job(force=False, claimed=False):
         with PROC_LOCK:
-            if JOB_ID in BUSY:return
+            if JOB_ID in BUSY and not claimed:return
             BUSY.add(JOB_ID)
         try:
             p=fetch_practice(CASE_ID)
@@ -53,10 +54,10 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
             with dbconn() as cn:
                 cn.execute("INSERT INTO reclamo_staff(id,case_id,status) VALUES(%s,%s,'AVVIATO') ON CONFLICT (id) DO NOTHING",(JOB_ID,CASE_ID))
             job=get_job()
-            if job['status']=='REVISIONATO' and job.get('final'):
+            if job['status']=='REVISIONATO' and job.get('final') and not force:
                 print('CONSIGLIO_RECLAMO already_done=true',flush=True)
                 return
-            stages=dict(job.get('stages') or {})
+            stages={} if force else dict(job.get('stages') or {})
             patch(status='IN_CORSO',issues='')
             system=BASE.format(today=datetime.date.today().isoformat())
             question=p['quesito']
@@ -157,7 +158,42 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
         job=get_job()
         if not job:return jsonify(status='NON_AVVIATO',stages=[]),200
         return jsonify(status=job['status'],stages=list(job.get('stages') or {}),
-            final_ready=bool(job.get('final')),updated_at=job['updated_at'].isoformat())
+            final_ready=bool(job.get('final')),updated_at=job['updated_at'].isoformat(),
+            issues=job.get('issues',''),approval=job.get('approval',''))
+
+    @APP.post('/api/cases/<pid>/reclamo/riesegui')
+    @require_auth
+    @safe_post
+    def reclamo_rerun(pid):
+        if pid!=CASE_ID:return jsonify(error='Non trovato'),404
+        if not request.is_json or not request.json or request.json.get('consent') is not True:
+            return jsonify(error='Conferma esplicita dell’invio al Consiglio e dei possibili costi API richiesta'),400
+        p=fetch_practice(CASE_ID)
+        if not p or p.get('status')!='COMPLETATO':
+            return jsonify(error='Il rapporto principale del Consiglio deve essere completato prima di rieseguire il reclamo'),409
+        ensure_table()
+        with PROC_LOCK:
+            if JOB_ID in BUSY:return jsonify(error='Revisione del reclamo già in corso'),409
+            BUSY.add(JOB_ID)
+        try:
+            with dbconn() as cn:
+                cn.execute("INSERT INTO reclamo_staff(id,case_id,status) VALUES(%s,%s,'AVVIATO') ON CONFLICT (id) DO NOTHING",(JOB_ID,CASE_ID))
+            job=get_job() or {}
+            history=list(job.get('history') or [])
+            if job.get('final') or job.get('approval'):
+                history.append({
+                    'status':job.get('status',''),
+                    'final':job.get('final',''),
+                    'issues':job.get('issues',''),
+                    'approval':job.get('approval',''),
+                    'updated_at':job.get('updated_at').isoformat() if job.get('updated_at') else ''
+                })
+            patch(status='AVVIATO',stages={},final='',issues='',approval='',history=history[-90:])
+            threading.Thread(target=run_job,args=(True,True),daemon=True).start()
+        except Exception as exc:
+            with PROC_LOCK:BUSY.discard(JOB_ID)
+            return jsonify(error='Impossibile avviare la nuova revisione: '+type(exc).__name__),500
+        return jsonify(ok=True,status='AVVIATO',archiviate=len(history)),202
 
     @APP.get('/api/cases/<pid>/reclamo/download')
     @require_auth
