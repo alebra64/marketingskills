@@ -28,7 +28,7 @@ def register(APP, require_auth, safe_post, fetch_practice, dbconn, ask, BASE, NA
                 issues TEXT NOT NULL DEFAULT '',
                 approval TEXT NOT NULL DEFAULT ''
             )""")
-            cn.execute("ALTER TABLE reclamo_staff ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]'::jsonb')
+            cn.execute("ALTER TABLE reclamo_staff ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]'::jsonb")
 
     def get_job():
         with dbconn() as cn:
