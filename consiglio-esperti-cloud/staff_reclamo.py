@@ -13,7 +13,7 @@ ROLE_ORDER=[
  ('privacy_bo zza','privacy'),
 ]
 
-def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
+def register(APP, require_auth, safe_post, fetch_practice, dbconn, ask, BASE, NAMES):
     def ensure_table():
         with dbconn() as cn:
             cn.execute("""CREATE TABLE IF NOT EXISTS reclamo_staff (
@@ -28,6 +28,7 @@ def register(APP, require_auth, fetch_practice, dbconn, ask, BASE, NAMES):
                 issues TEXT NOT NULL DEFAULT '',
                 approval TEXT NOT NULL DEFAULT ''
             )""")
+            cn.execute("ALTER TABLE reclamo_staff ADD COLUMN IF NOT EXISTS history JSONB NOT NULL DEFAULT '[]'::jsonb')
 
     def get_job():
         with dbconn() as cn:
